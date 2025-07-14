@@ -5,7 +5,7 @@
 all: isolate isolate.1 isolate.1.html isolate-check-environment
 
 CC=gcc
-CFLAGS=-std=gnu99 -Wall -Wextra -Wno-parentheses -Wno-unused-result -Wno-missing-field-initializers -Wstrict-prototypes -Wmissing-prototypes -D_GNU_SOURCE
+CFLAGS=-std=gnu99 -fPIC -Wall -Wextra -Wno-parentheses -Wno-unused-result -Wno-missing-field-initializers -Wstrict-prototypes -Wmissing-prototypes -D_GNU_SOURCE
 LIBS=-lcap
 
 VERSION=1.8.1
