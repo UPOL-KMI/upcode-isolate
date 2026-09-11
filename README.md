@@ -1,3 +1,31 @@
+<!-- UPcode fork notice -- keep this at the top; see the Licence section at the end. -->
+
+> ## About this fork
+>
+> This is a fork of [ReCodEx/isolate](https://github.com/ReCodEx/isolate) (itself a fork of
+> [ioi/isolate](https://github.com/ioi/isolate)), maintained by the **Department of Computer
+> Science, Faculty of Science, Palacký University Olomouc** as part of **UPcode** — the
+> department's deployment of ReCodEx, adapted to its needs.
+>
+> Not affiliated with, nor endorsed by, the ReCodEx Team or the Isolate authors.
+>
+> **Branches**
+>
+> | Branch   | What it is                                                              |
+> | -------- | ----------------------------------------------------------------------- |
+> | `master` | Untouched mirror of `ReCodEx/isolate`. Nothing of ours is committed here. |
+> | `upcode` | Our integration branch, and the default. Changes from upstream live here. |
+>
+> **Licence: this repository is GPL-2.0-or-later**, unlike the rest of the UPcode stack, which is
+> MIT. Isolate is © Martin Mareš and Bernard Blackham; see `LICENSE`, which is unchanged and must
+> stay that way. Files we modify carry a note saying so and when, as GPLv2 §2(a) asks of anyone who
+> passes the result on. Running a service on it is not distribution and triggers no obligation;
+> handing the binary or a container image to somebody else does.
+>
+> **Why it is forked at all:** the vendored Isolate 1.8.1 supports only cgroup **v1**, and current
+> Linux distributions default to cgroup v2's unified hierarchy — on which `isolate --cg` refuses to
+> run and no submitted code can be evaluated. Work on that happens here.
+
 isolate
 =======
 
