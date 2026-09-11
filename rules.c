@@ -1,12 +1,14 @@
 /*
  *	Process Isolator -- Rules
  *
- *	(c) 2012-2018 Martin Mares <mj@ucw.cz>
+ *	(c) 2012-2026 Martin Mares <mj@ucw.cz>
  *	(c) 2012-2014 Bernard Blackham <bernard@blackham.com.au>
  */
 
 #include "isolate.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <mntent.h>
 #include <stdio.h>
@@ -16,6 +18,7 @@
 #include <sys/mount.h>
 #include <sys/quota.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/vfs.h>
 #include <unistd.h>
 
@@ -207,13 +210,13 @@ sanitize_dir_path(char *path)
   return path;
 }
 
-static int
+static const char *
 add_dir_rule(char *in, char *out, unsigned int flags)
 {
   // Make sure that "in" does not try to escape the box
   in = sanitize_dir_path(in);
   if (!in)
-    return 0;
+    return "Invalid path";
 
   // Override an existing rule
   struct dir_rule *r;
@@ -232,52 +235,71 @@ add_dir_rule(char *in, char *out, unsigned int flags)
     }
   r->outside = out;
   r->flags = flags;
-  return 1;
+  return NULL;
 }
 
-static unsigned int
-parse_dir_option(char *opt)
+static bool
+parse_dir_option(char *opt, unsigned int *dest)
 {
   for (unsigned int i = 0; i < ARRAY_SIZE(dir_flag_names); i++)
     if (!strcmp(opt, dir_flag_names[i]))
-      return 1U << i;
-  die("Unknown directory option %s", opt);
+      {
+	*dest = 1U << i;
+	return true;
+      }
+  return false;
 }
 
-static int
-set_dir_action_ext(char *arg, unsigned int ext_flags)
+static bool
+valid_filesystem_p(const char *fs)
 {
-  arg = xstrdup(arg);
+  return (!strcmp(fs, "proc") ||
+          !strcmp(fs, "sysfs") ||
+          !strcmp(fs, "tmpfs") ||
+          !strcmp(fs, "devpts"));
+}
 
-  char *colon = strchr(arg, ':');
+static const char *
+set_dir_action_ext(const char *arg, unsigned int ext_flags)
+{
+  char *copy = xstrdup(arg);
+
+  char *colon = strchr(copy, ':');
   unsigned int flags = ext_flags;
   while (colon)
     {
-      *colon++ = 0;
-      char *next = strchr(colon, ':');
+      *colon = 0;
+      char *opt = colon + 1;
+      char *next = strchr(opt, ':');
       if (next)
 	*next = 0;
-      flags |= parse_dir_option(colon);
+      unsigned flag;
+      if (!parse_dir_option(opt, &flag))
+	// We leak memory, but we are going to die anyway
+	return xsprintf("Unknown option '%s'", opt);
+      flags |= flag;
       colon = next;
     }
 
-  char *eq = strchr(arg, '=');
+  char *eq = strchr(copy, '=');
   if (eq)
     *eq++ = 0;
 
   if ((flags & DIR_FLAG_FS) && (flags & DIR_FLAG_TMP))
-    return 0;
+    return "Flags 'fs' and 'tmp' are mutually exclusive";
 
   if (flags & DIR_FLAG_FS)
     {
-      if (!eq || strchr(eq, '/'))
-	return 0;
-      return add_dir_rule(arg, eq, flags);
+      if (!eq)
+	return "Missing filesystem name";
+      if (!valid_filesystem_p(eq))
+	return "This filesystem is not supported";
+      return add_dir_rule(copy, eq, flags);
     }
   else if (flags & DIR_FLAG_TMP)
     {
       if (eq)
-	return 0;
+	return "Temporary directory mounts do not have a right-hand side";
       /*
        *  Construct an outside temporary directory, which will be later
        *  chowned to box_uid. The hierarchy of these directories is intentionally
@@ -285,38 +307,40 @@ set_dir_action_ext(char *arg, unsigned int ext_flags)
        *  tampered with in a previous run of the sandbox.
        */
       char out[1024];
-      snprintf(out, sizeof(out), "./tmp/%s", arg);
+      snprintf(out, sizeof(out), "./tmp/%s", copy);
       for (char *p = out + strlen("./tmp/"); *p; p++)
 	if (*p == '/')
 	  *p = ':';		// This is safe, there were no colons in "out"
-      return add_dir_rule(arg, xstrdup(out), flags | DIR_FLAG_RW);
+      return add_dir_rule(copy, xstrdup(out), flags | DIR_FLAG_RW);
     }
   else if (eq)
     {
       if (!eq[0])
-	return add_dir_rule(arg, NULL, flags);
+	return add_dir_rule(copy, NULL, flags);
       if (eq[0] != '/' && strncmp(eq, "./", 2))
-	return 0;
-      return add_dir_rule(arg, eq, flags);
+	return "Right-hand side must start with '/' or './'";
+      return add_dir_rule(copy, eq, flags);
     }
   else
     {
-      char *out = xmalloc(1 + strlen(arg) + 1);
-      sprintf(out, "/%s", arg);
-      return add_dir_rule(arg, out, flags);
+      char *out = xmalloc(1 + strlen(copy) + 1);
+      sprintf(out, "/%s", copy);
+      return add_dir_rule(copy, out, flags);
     }
 }
 
-int
-set_dir_action(char *arg)
+const char *
+set_dir_action(const char *arg)
 {
   return set_dir_action_ext(arg, 0);
 }
 
-static int
-set_dir_action_default(char *arg)
+static void
+set_dir_action_default(const char *arg)
 {
-  return set_dir_action_ext(arg, DIR_FLAG_DEFAULT);
+  const char *err = set_dir_action_ext(arg, DIR_FLAG_DEFAULT);
+  if (err)
+    die("Error parsing built-in directory rule '%s': %s", arg, err);
 }
 
 void
@@ -324,7 +348,8 @@ init_dir_rules(void)
 {
   set_dir_action_default("box=./box:rw");
   set_dir_action_default("bin");
-  set_dir_action_default("dev:dev");
+  set_dir_action_default("dev:dev:norec");
+  set_dir_action_default("dev/shm=tmpfs:fs:rw");
   set_dir_action_default("lib");
   set_dir_action_default("lib64:maybe");
   set_dir_action_default("proc=proc:fs");
@@ -372,11 +397,17 @@ apply_dir_rules(int with_defaults)
 	  continue;
 	}
 
-      if ((r->flags & DIR_FLAG_MAYBE) && !dir_exists(out))
+      if (r->flags & DIR_FLAG_MAYBE)
 	{
-	  msg("Not binding %s on %s (does not exist)\n", out, r->inside);
-	  r->flags |= DIR_FLAG_DISABLED;
-	  continue;
+	  switch_fsid_to_caller();
+	  bool exists = dir_exists(out);
+	  switch_fsid_back();
+	  if (!exists)
+	    {
+	      msg("Not binding %s on %s (does not exist)\n", out, r->inside);
+	      r->flags |= DIR_FLAG_DISABLED;
+	      continue;
+	    }
 	}
 
       char root_in[1024];
@@ -464,42 +495,13 @@ apply_dir_rules(int with_defaults)
 
 /*** Disk quotas ***/
 
-static int
-path_begins_with(char *path, char *with)
+static void
+quotactl_error(void)
 {
-  while (*with)
-    if (*path++ != *with++)
-      return 0;
-  return (!*with || *with == '/');
-}
-
-static char *
-find_device(char *path)
-{
-  FILE *f = setmntent("/proc/mounts", "r");
-  if (!f)
-    die("Cannot open /proc/mounts: %m");
-
-  struct mntent *me;
-  int best_len = 0;
-  char *best_dev = NULL;
-  while (me = getmntent(f))
-    {
-      if (!path_begins_with(me->mnt_fsname, "/dev"))
-	continue;
-      if (path_begins_with(path, me->mnt_dir))
-	{
-	  int len = strlen(me->mnt_dir);
-	  if (len > best_len)
-	    {
-	      best_len = len;
-	      free(best_dev);
-	      best_dev = xstrdup(me->mnt_fsname);
-	    }
-	}
-    }
-  endmntent(f);
-  return best_dev;
+  // This errno has an outstandingly unhelpful message of "no such process".
+  if (errno == ESRCH)
+    die("Cannot set disk quota: quotas have not been enabled for this filesystem");
+  die("Cannot set disk quota: %m");
 }
 
 void
@@ -508,26 +510,6 @@ set_quota(void)
   if (!block_quota)
     return;
 
-  char cwd[PATH_MAX];
-  if (!getcwd(cwd, sizeof(cwd)))
-    die("getcwd: %m");
-
-  char *dev = find_device(cwd);
-  if (!dev)
-    die("Cannot identify filesystem which contains %s", cwd);
-  msg("Quota: Mapped path %s to a filesystem on %s\n", cwd, dev);
-
-  // Sanity check
-  struct stat dev_st, cwd_st;
-  if (stat(dev, &dev_st) < 0)
-    die("Cannot identify block device %s: %m", dev);
-  if (!S_ISBLK(dev_st.st_mode))
-    die("Expected that %s is a block device", dev);
-  if (stat(".", &cwd_st) < 0)
-    die("Cannot stat cwd: %m");
-  if (cwd_st.st_dev != dev_st.st_rdev)
-    die("Identified %s as a filesystem on %s, but it is obviously false", cwd, dev);
-
   struct dqblk dq = {
     .dqb_bhardlimit = block_quota,
     .dqb_bsoftlimit = block_quota,
@@ -535,9 +517,17 @@ set_quota(void)
     .dqb_isoftlimit = inode_quota,
     .dqb_valid = QIF_LIMITS,
   };
-  if (quotactl(QCMD(Q_SETQUOTA, USRQUOTA), dev, box_uid, (caddr_t) &dq) < 0)
-    die("Cannot set disk quota: %m");
-  msg("Quota: Set block quota %d and inode quota %d\n", block_quota, inode_quota);
+  void *dq_ptr = (void*)&dq;
+  int quota_op = QCMD(Q_SETQUOTA, USRQUOTA);
 
-  free(dev);
+  int cwd_fd = open(".", O_DIRECTORY | O_PATH);
+  if (cwd_fd < 0)
+    die("open: %m");
+
+  if (syscall(SYS_quotactl_fd, cwd_fd, quota_op, box_uid, dq_ptr) < 0)
+    quotactl_error();
+
+  close(cwd_fd);
+
+  msg("Quota: Set block quota %d and inode quota %d\n", block_quota, inode_quota);
 }
